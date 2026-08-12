@@ -11,6 +11,8 @@
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishTrimmed>false</PublishTrimmed>
+    <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+    <EnableSingleFileAnalyzer>false</EnableSingleFileAnalyzer>
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
