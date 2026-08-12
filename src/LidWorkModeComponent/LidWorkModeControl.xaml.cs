@@ -49,6 +49,14 @@ public partial class LidWorkModeControl : UserControl
 
     public bool RestoreAndWait(int timeoutMilliseconds) => RestoreAsync(TimeSpan.FromMilliseconds(timeoutMilliseconds)).GetAwaiter().GetResult();
 
+    public bool ScrollByWheelDelta(int delta)
+    {
+        if (ContentScroller.ScrollableHeight <= 0) return false;
+        double previousOffset = ContentScroller.VerticalOffset;
+        ContentScroller.ScrollToVerticalOffset(previousOffset - delta);
+        return !ContentScroller.VerticalOffset.Equals(previousOffset);
+    }
+
     private async void Enable_Click(object sender, RoutedEventArgs e)
     {
         if (AcToggle.IsChecked != true && DcToggle.IsChecked != true)

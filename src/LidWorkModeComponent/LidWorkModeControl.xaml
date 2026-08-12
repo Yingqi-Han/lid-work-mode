@@ -2,11 +2,17 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml">
-  <Grid>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Grid MaxWidth="820" Margin="0,0,24,36" HorizontalAlignment="Left">
+  <Grid MaxWidth="820" Margin="0,0,24,20" HorizontalAlignment="Left">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+    <ScrollViewer x:Name="ContentScroller" Grid.Row="0" VerticalScrollBarVisibility="Auto"
+        HorizontalScrollBarVisibility="Disabled" Focusable="False" IsTabStop="False"
+        FocusVisualStyle="{x:Null}" PanningMode="VerticalOnly">
+      <Grid Margin="0,0,14,18">
         <Grid.RowDefinitions>
-          <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <StackPanel>
           <TextBlock Text="合盖继续运行" FontSize="28" FontWeight="SemiBold" />
@@ -42,16 +48,21 @@
 
         <ui:InfoBar Grid.Row="3" Margin="0,18,0,0" IsOpen="True" Severity="Warning" Title="注意散热" Message="合盖运行时请放在通风、坚硬的表面；不要放进背包、床铺或被褥。" />
 
-        <StackPanel Grid.Row="4" Margin="0,22,0,0">
-          <StackPanel Orientation="Horizontal">
-            <ui:Button x:Name="EnableButton" Width="210" Height="46" Appearance="Primary" Content="启用本次合盖运行" FontWeight="SemiBold" Click="Enable_Click" />
-            <ui:Button x:Name="RestoreButton" Margin="12,0,0,0" Width="180" Height="46" Content="立即恢复原设置" IsEnabled="False" Click="Restore_Click" />
-            <ProgressBar x:Name="BusyProgress" Margin="18,0,0,0" Width="120" IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center" />
-          </StackPanel>
-          <ui:InfoBar x:Name="StatusBar" Margin="0,18,0,0" IsOpen="True" Severity="Informational" Title="尚未启用" Message="当前不会修改电源设置。" />
-        </StackPanel>
       </Grid>
     </ScrollViewer>
-    <ui:ContentDialogHost x:Name="DialogHost" />
+
+    <Border Grid.Row="1" Padding="0,16,0,0" BorderThickness="0,1,0,0"
+        BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"
+        Background="{DynamicResource ApplicationBackgroundBrush}">
+      <StackPanel>
+        <StackPanel Orientation="Horizontal">
+          <ui:Button x:Name="EnableButton" Width="210" Height="46" Appearance="Primary" Content="启用本次合盖运行" FontWeight="SemiBold" Click="Enable_Click" />
+          <ui:Button x:Name="RestoreButton" Margin="12,0,0,0" Width="180" Height="46" Content="立即恢复原设置" IsEnabled="False" Click="Restore_Click" />
+          <ProgressBar x:Name="BusyProgress" Margin="18,0,0,0" Width="120" IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center" />
+        </StackPanel>
+        <ui:InfoBar x:Name="StatusBar" Margin="0,12,0,0" IsOpen="True" Severity="Informational" Title="尚未启用" Message="当前不会修改电源设置。" />
+      </StackPanel>
+    </Border>
+    <ui:ContentDialogHost x:Name="DialogHost" Grid.RowSpan="2" />
   </Grid>
 </UserControl>
