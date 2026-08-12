@@ -1,0 +1,12 @@
+name: build
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and self-test
+        shell: powershell
+        run: .\build.ps1
