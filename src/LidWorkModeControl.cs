@@ -150,16 +150,19 @@ namespace LidWorkMode
             badge.Left = stateCard.Width - 88;
             stateCard.Resize += delegate { badge.Left = stateCard.ClientSize.Width - 88; };
             _scheme.SetBounds(24, 46, 660, 22);
-            _scheme.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
             _scheme.Font = new Font("Segoe UI", 8.5F);
             _scheme.ForeColor = LidTheme.Muted;
             _scheme.BackColor = Color.Transparent;
             _details.SetBounds(24, 71, 660, 34);
-            _details.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
             _details.Font = new Font("Microsoft YaHei UI", 9F);
             _details.ForeColor = LidTheme.Text;
             _details.BackColor = Color.Transparent;
             stateCard.Controls.AddRange(new Control[] { stateTitle, badge, _scheme, _details });
+            stateCard.Resize += delegate
+            {
+                _scheme.Width = Math.Max(200, stateCard.ClientSize.Width - 48);
+                _details.Width = Math.Max(200, stateCard.ClientSize.Width - 48);
+            };
 
             Panel gapOne = new Panel { Dock = DockStyle.Top, Height = 12, BackColor = LidTheme.Canvas };
             LidCard optionsCard = new LidCard { Dock = DockStyle.Top, Height = 216 };
@@ -181,8 +184,8 @@ namespace LidWorkMode
             warningMark.TextAlign = ContentAlignment.MiddleCenter;
             Label warningTitle = MakeLabel("注意散热", 76, 15, 180, 26, 10F, FontStyle.Bold, Color.FromArgb(121, 78, 20));
             Label warningText = MakeLabel("合盖运行时请放在通风、坚硬的表面；不要放进背包、床铺或被褥。", 76, 39, 610, 28, 8.8F, FontStyle.Regular, Color.FromArgb(143, 98, 37));
-            warningText.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
             warningCard.Controls.AddRange(new Control[] { warningMark, warningTitle, warningText });
+            warningCard.Resize += delegate { warningText.Width = Math.Max(200, warningCard.ClientSize.Width - 100); };
 
             Panel actionPanel = new Panel { Dock = DockStyle.Top, Height = 78, BackColor = LidTheme.Canvas };
             _enable.Text = "启用本次合盖运行";
@@ -199,12 +202,12 @@ namespace LidWorkMode
             _restore.Enabled = false;
             _restore.Click += delegate { RestoreAndWait(10000); };
             _status.SetBounds(445, 18, 240, 48);
-            _status.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
             _status.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
             _status.ForeColor = LidTheme.Muted;
             _status.TextAlign = ContentAlignment.MiddleLeft;
             _status.Text = "尚未启用，不会修改电源设置";
             actionPanel.Controls.AddRange(new Control[] { _enable, _restore, _status });
+            actionPanel.Resize += delegate { _status.Width = Math.Max(120, actionPanel.ClientSize.Width - 445); };
 
             Controls.Add(actionPanel);
             Controls.Add(warningCard);
