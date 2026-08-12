@@ -48,7 +48,12 @@ namespace LidWorkMode
 
         public static GuardState Load()
         {
-            using (FileStream stream = File.OpenRead(GuardPaths.StateFile)) return (GuardState)new DataContractJsonSerializer(typeof(GuardState)).ReadObject(stream);
+            using (FileStream stream = File.OpenRead(GuardPaths.StateFile))
+            {
+                GuardState state = (GuardState)new DataContractJsonSerializer(typeof(GuardState)).ReadObject(stream);
+                if (state == null || state.schemaVersion != 1) throw new SerializationException("Unsupported recovery state schema.");
+                return state;
+            }
         }
 
         public static void Delete() { if (File.Exists(GuardPaths.StateFile)) File.Delete(GuardPaths.StateFile); }
@@ -130,6 +135,8 @@ namespace LidWorkMode
             string arguments = "/Create /F /TN \"YingqiTools-PowerGuard-Recover\" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR \"\\\"" + GuardPaths.InstalledExe + "\\\" recover\"";
             Process process = Process.Start(new ProcessStartInfo("schtasks.exe", arguments) { UseShellExecute = false, CreateNoWindow = true });
             process.WaitForExit(); if (process.ExitCode != 0) throw new InvalidOperationException("Failed to create recovery task.");
+            Process verify = Process.Start(new ProcessStartInfo("schtasks.exe", "/Query /TN \"YingqiTools-PowerGuard-Recover\"") { UseShellExecute = false, CreateNoWindow = true });
+            verify.WaitForExit(); if (verify.ExitCode != 0) throw new InvalidOperationException("Recovery task verification failed.");
         }
 
         private static bool ParseFlag(string value) { if (value == "1") return true; if (value == "0") return false; throw new ArgumentException("Boolean flags must be 0 or 1."); }

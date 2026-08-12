@@ -10,7 +10,7 @@ $component = Join-Path $build 'LidWorkModeComponent.dll'
 $guard = Join-Path $build 'PowerGuard.exe'
 & $compiler /nologo /target:library /platform:anycpu /optimize+ "/out:$component" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $src 'PowerPlan.cs') (Join-Path $src 'LidWorkModeControl.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Component compilation failed.' }
-& $compiler /nologo /target:exe /platform:anycpu /optimize+ "/out:$guard" /reference:System.dll /reference:System.Core.dll /reference:System.Runtime.Serialization.dll /reference:System.Security.dll (Join-Path $src 'PowerPlan.cs') (Join-Path $src 'PowerGuard.cs')
+& $compiler /nologo /target:winexe /platform:anycpu /optimize+ "/out:$guard" /reference:System.dll /reference:System.Core.dll /reference:System.Runtime.Serialization.dll /reference:System.Security.dll (Join-Path $src 'PowerPlan.cs') (Join-Path $src 'PowerGuard.cs')
 if ($LASTEXITCODE -ne 0) { throw 'PowerGuard compilation failed.' }
 $test = Start-Process -FilePath $guard -ArgumentList 'self-test' -PassThru -Wait
 if ($test.ExitCode -ne 0) { throw "PowerGuard self-test failed: $($test.ExitCode)" }
