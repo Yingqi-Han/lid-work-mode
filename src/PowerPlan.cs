@@ -53,7 +53,7 @@ namespace LidWorkMode
         {
             IntPtr pointer;
             Check(PowerGetActiveScheme(IntPtr.Zero, out pointer), "PowerGetActiveScheme");
-            try { return (Guid)Marshal.PtrToStructure(pointer, typeof(Guid)); }
+            try { return Marshal.PtrToStructure<Guid>(pointer); }
             finally { LocalFree(pointer); }
         }
 

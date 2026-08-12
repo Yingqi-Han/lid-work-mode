@@ -1,17 +1,27 @@
-param()
+param([switch]$LockedMode)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$src = Join-Path $root 'src'
-$build = Join-Path $root 'build'
-$compiler = @((Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'), (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $compiler) { throw 'The .NET Framework C# compiler was not found.' }
-New-Item -ItemType Directory -Path $build -Force | Out-Null
-$component = Join-Path $build 'LidWorkModeComponent.dll'
-$guard = Join-Path $build 'PowerGuard.exe'
-& $compiler /nologo /target:library /platform:anycpu /optimize+ "/out:$component" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $src 'PowerPlan.cs') (Join-Path $src 'LidWorkModeControl.cs')
-if ($LASTEXITCODE -ne 0) { throw 'Component compilation failed.' }
-& $compiler /nologo /target:winexe /platform:anycpu /optimize+ "/out:$guard" /reference:System.dll /reference:System.Core.dll /reference:System.Runtime.Serialization.dll /reference:System.Security.dll (Join-Path $src 'PowerPlan.cs') (Join-Path $src 'PowerGuard.cs')
-if ($LASTEXITCODE -ne 0) { throw 'PowerGuard compilation failed.' }
-$test = Start-Process -FilePath $guard -ArgumentList 'self-test' -PassThru -Wait
+$dotnet = $env:YINGQI_DOTNET
+if (-not $dotnet) { $dotnet = (Get-Command dotnet -ErrorAction Stop).Source }
+if (-not (Test-Path -LiteralPath $dotnet)) { throw 'Set YINGQI_DOTNET to a valid .NET 10 SDK dotnet.exe.' }
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$env:DOTNET_NOLOGO = '1'
+$build = [System.IO.Path]::GetFullPath((Join-Path $root 'build'))
+$rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $build.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe build path: $build" }
+$solution = Join-Path $root 'LidWorkMode.slnx'
+New-Item -ItemType Directory -Force -Path $build | Out-Null
+Get-ChildItem -LiteralPath $build -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+$restoreArgs = @('restore', $solution)
+if ($LockedMode) { $restoreArgs += '--locked-mode' }
+& $dotnet @restoreArgs
+if ($LASTEXITCODE -ne 0) { throw 'Restore failed.' }
+& $dotnet build $solution -c Release --no-restore
+if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+& $dotnet publish (Join-Path $root 'src\PowerGuard\PowerGuard.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false --no-restore -o (Join-Path $build 'guard')
+if ($LASTEXITCODE -ne 0) { throw 'PowerGuard publish failed.' }
+Copy-Item (Join-Path $root 'src\LidWorkModeComponent\bin\Release\net10.0-windows\LidWorkModeComponent.dll') $build -Force
+Copy-Item (Join-Path $build 'guard\PowerGuard.exe') $build -Force
+$test = Start-Process (Join-Path $build 'PowerGuard.exe') -ArgumentList 'self-test' -PassThru -Wait
 if ($test.ExitCode -ne 0) { throw "PowerGuard self-test failed: $($test.ExitCode)" }
-Get-Item -LiteralPath $component, $guard | Select-Object FullName, Length, LastWriteTime
+Get-Item (Join-Path $build 'LidWorkModeComponent.dll'), (Join-Path $build 'PowerGuard.exe') | Select-Object FullName, Length, LastWriteTime

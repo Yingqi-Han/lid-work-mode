@@ -16,11 +16,15 @@ Yingqi Tools 的可独立维护组件。它在用户明确启用的当次会话�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
+需要 .NET 10 SDK（仓库用 `global.json` 固定为 10.0.101），也可以通过 `YINGQI_DOTNET` 指定 SDK 路径。发布的 `PowerGuard.exe` 是 `win-x64` self-contained 单文件，不要求用户预装运行库。
+
 ## Public API
 
 - `PowerPlanService.ReadCurrent()`
 - `EnableOptions { Ac, Dc, PreventIdleSleep }`
 - `LidWorkModeControl`
 - `PowerGuard.exe install|enable|recover|status|self-test`
+
+`LidWorkModeControl` 已迁移为 WPF Fluent `UserControl`；PowerGuard 仍是独立、无 UI 依赖的安全进程，恢复日志 schema 和固定命令保持兼容。
 
 MIT licensed. No telemetry or network access.

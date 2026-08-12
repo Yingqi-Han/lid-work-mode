@@ -35,7 +35,7 @@ namespace LidWorkMode
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), FileSystemRights.ReadAndExecute, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-            Directory.SetAccessControl(GuardPaths.DataDirectory, security);
+            new DirectoryInfo(GuardPaths.DataDirectory).SetAccessControl(security);
         }
 
         public static void Save(GuardState state)
@@ -113,7 +113,7 @@ namespace LidWorkMode
             EventWaitHandleSecurity security = new EventWaitHandleSecurity();
             security.AddAccessRule(new EventWaitHandleAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), EventWaitHandleRights.Synchronize | EventWaitHandleRights.Modify, AccessControlType.Allow));
             bool created;
-            return new EventWaitHandle(false, EventResetMode.AutoReset, GuardPaths.StopEventName, out created, security);
+            return EventWaitHandleAcl.Create(false, EventResetMode.AutoReset, GuardPaths.StopEventName, out created, security);
         }
 
         private static void Recover()
