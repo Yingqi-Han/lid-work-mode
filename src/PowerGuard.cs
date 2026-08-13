@@ -9,24 +9,423 @@ using System.Threading;
 
 namespace LidWorkMode
 {
+    internal enum GuardCommand
+    {
+        SelfTest,
+        Status,
+        Recover,
+        Install,
+        Enable
+    }
+
+    internal readonly record struct GuardInvocation(
+        GuardCommand Command,
+        EnableOptions? Options = null,
+        int OwnerProcessId = 0);
+
+    internal static class GuardCommandParser
+    {
+        public const int InvalidArgumentsExitCode = 64;
+
+        public static bool TryParse(string[] args, out GuardInvocation invocation)
+        {
+            invocation = default;
+            if (args is null || args.Length == 0) return false;
+
+            switch (args[0].ToLowerInvariant())
+            {
+                case "self-test" when args.Length == 1:
+                    invocation = new GuardInvocation(GuardCommand.SelfTest);
+                    return true;
+                case "status" when args.Length == 1:
+                    invocation = new GuardInvocation(GuardCommand.Status);
+                    return true;
+                case "recover" when args.Length == 1:
+                    invocation = new GuardInvocation(GuardCommand.Recover);
+                    return true;
+                case "install" when args.Length == 1:
+                    invocation = new GuardInvocation(GuardCommand.Install);
+                    return true;
+                case "enable" when args.Length == 5:
+                    return TryParseEnable(args, out invocation);
+                default:
+                    return false;
+            }
+        }
+
+        private static bool TryParseEnable(string[] args, out GuardInvocation invocation)
+        {
+            invocation = default;
+            if (!TryParseFlag(args[1], out bool ac) ||
+                !TryParseFlag(args[2], out bool dc) ||
+                !TryParseFlag(args[3], out bool idle) ||
+                !int.TryParse(args[4], out int ownerPid) ||
+                ownerPid <= 0 ||
+                (!ac && !dc))
+            {
+                return false;
+            }
+
+            invocation = new GuardInvocation(
+                GuardCommand.Enable,
+                new EnableOptions { Ac = ac, Dc = dc, PreventIdleSleep = idle },
+                ownerPid);
+            return true;
+        }
+
+        private static bool TryParseFlag(string value, out bool result)
+        {
+            if (value == "1") { result = true; return true; }
+            if (value == "0") { result = false; return true; }
+            result = false;
+            return false;
+        }
+    }
+
+    internal enum GuardMonitorDecision
+    {
+        Continue,
+        StopRequested,
+        OwnerExited,
+        ActiveSchemeChanged
+    }
+
+    internal static class GuardMonitorPolicy
+    {
+        public static GuardMonitorDecision Evaluate(bool stopRequested, bool ownerHasExited, Guid activeScheme, Guid managedScheme)
+        {
+            if (stopRequested) return GuardMonitorDecision.StopRequested;
+            if (ownerHasExited) return GuardMonitorDecision.OwnerExited;
+            if (activeScheme != managedScheme) return GuardMonitorDecision.ActiveSchemeChanged;
+            return GuardMonitorDecision.Continue;
+        }
+    }
+
+    internal static class GuardEnablePolicy
+    {
+        public const int ExistingRecoveryStateExitCode = 66;
+
+        public static bool CanEnable(bool recoveryStateExists) => !recoveryStateExists;
+    }
+
+    internal interface IGuardStateRepository
+    {
+        bool Exists { get; }
+        void Save(GuardState state);
+        GuardState Load();
+        void Delete();
+    }
+
+    internal interface IGuardReadySignal
+    {
+        bool IsSet { get; }
+        void Reset();
+        void Set();
+    }
+
+    internal enum GuardEnableOutcome
+    {
+        Ready,
+        ApplyFailedRestored,
+        ApplyFailedRecoveryPending,
+        VerificationFailedRestored,
+        VerificationFailedRecoveryPending
+    }
+
+    internal sealed class PowerGuardCoordinator
+    {
+        private readonly IPowerPlanBackend _power;
+        private readonly IGuardStateRepository _states;
+        private readonly IGuardReadySignal _ready;
+
+        public PowerGuardCoordinator(IPowerPlanBackend power, IGuardStateRepository states, IGuardReadySignal ready)
+        {
+            _power = power;
+            _states = states;
+            _ready = ready;
+        }
+
+        public GuardEnableOutcome Enable(PowerPlanSnapshot original, EnableOptions options, int ownerProcessId, DateTime createdUtc)
+        {
+            _ready.Reset();
+            _states.Save(GuardStore.CreateState(original, options, ownerProcessId, createdUtc));
+            bool applyCompleted = false;
+            try
+            {
+                PowerPlanService.Apply(_power, original, options);
+                applyCompleted = true;
+            }
+            catch
+            {
+                return TryRestoreAndDelete(original, options, out _)
+                    ? GuardEnableOutcome.ApplyFailedRestored
+                    : GuardEnableOutcome.ApplyFailedRecoveryPending;
+            }
+
+            bool applyVerified;
+            try
+            {
+                applyVerified = PowerPlanVerifier.MatchesManagedValues(
+                    _power.Read(original.SchemeGuid),
+                    original.SchemeGuid,
+                    PowerPlanMutationPlanner.CreateApply(original, options));
+            }
+            catch
+            {
+                applyVerified = false;
+            }
+
+            if (!applyCompleted || !applyVerified)
+            {
+                return TryRestoreAndDelete(original, options, out _)
+                    ? GuardEnableOutcome.VerificationFailedRestored
+                    : GuardEnableOutcome.VerificationFailedRecoveryPending;
+            }
+
+            _ready.Set();
+            return GuardEnableOutcome.Ready;
+        }
+
+        public bool Recover()
+        {
+            if (!_states.Exists)
+            {
+                TryResetReady();
+                return true;
+            }
+            try
+            {
+                GuardState state = _states.Load();
+                (PowerPlanSnapshot original, EnableOptions options) = GuardStore.CreateRecovery(state);
+                TryResetReady();
+                return TryRestoreAndDelete(original, options, out _);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal bool TryRestoreAndDelete(PowerPlanSnapshot original, EnableOptions options, out bool cleanupPending)
+        {
+            cleanupPending = false;
+            try
+            {
+                PowerPlanService.Restore(_power, original, options);
+                PowerPlanSnapshot actual = _power.Read(original.SchemeGuid);
+                if (!PowerPlanVerifier.MatchesManagedValues(actual, original.SchemeGuid, PowerPlanMutationPlanner.CreateRestore(original, options))) return false;
+                TryResetReady();
+                try { _states.Delete(); }
+                catch { cleanupPending = true; }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void TryResetReady()
+        {
+            try { _ready.Reset(); }
+            catch { }
+        }
+    }
+
+    internal static class PowerPlanVerifier
+    {
+        public static bool MatchesManagedValues(PowerPlanSnapshot actual, Guid expectedScheme, IReadOnlyList<PowerSettingWrite> expectedWrites)
+        {
+            if (actual.SchemeGuid != expectedScheme) return false;
+            foreach (PowerSettingWrite write in expectedWrites)
+            {
+                uint actualValue = (write.Supply, write.Setting) switch
+                {
+                    (PowerSupply.Ac, var setting) when setting == PowerPlanService.LidAction => actual.LidAc,
+                    (PowerSupply.Dc, var setting) when setting == PowerPlanService.LidAction => actual.LidDc,
+                    (PowerSupply.Ac, var setting) when setting == PowerPlanService.StandbyIdle => actual.SleepAc,
+                    (PowerSupply.Dc, var setting) when setting == PowerPlanService.StandbyIdle => actual.SleepDc,
+                    _ => uint.MaxValue
+                };
+                if (actualValue != write.Value) return false;
+            }
+            return true;
+        }
+    }
+
     [DataContract]
     internal sealed class GuardState
     {
-        [DataMember] public int schemaVersion = 1;
-        [DataMember] public Guid schemeGuid;
-        [DataMember] public uint lidAc;
-        [DataMember] public uint lidDc;
-        [DataMember] public uint sleepAc;
-        [DataMember] public uint sleepDc;
-        [DataMember] public bool ac;
-        [DataMember] public bool dc;
-        [DataMember] public bool preventIdleSleep;
-        [DataMember] public int ownerProcessId;
-        [DataMember] public DateTime createdUtc;
+        [DataMember(IsRequired = true)] public int schemaVersion = 1;
+        [DataMember(IsRequired = true)] public Guid schemeGuid;
+        [DataMember(IsRequired = true)] public uint lidAc;
+        [DataMember(IsRequired = true)] public uint lidDc;
+        [DataMember(IsRequired = true)] public uint sleepAc;
+        [DataMember(IsRequired = true)] public uint sleepDc;
+        [DataMember(IsRequired = true)] public bool ac;
+        [DataMember(IsRequired = true)] public bool dc;
+        [DataMember(IsRequired = true)] public bool preventIdleSleep;
+        [DataMember(IsRequired = true)] public int ownerProcessId;
+        [DataMember(IsRequired = true)] public DateTime createdUtc;
+    }
+
+    internal static class GuardStateValidator
+    {
+        public static bool TryValidate(GuardState? state, out string error)
+        {
+            if (state is null) return Fail("Recovery state is missing.", out error);
+            if (state.schemaVersion != 1) return Fail("Unsupported recovery state schema.", out error);
+            if (state.schemeGuid == Guid.Empty) return Fail("Recovery state has an invalid power scheme.", out error);
+            if (state.ownerProcessId <= 0) return Fail("Recovery state has an invalid owner process.", out error);
+            if (state.createdUtc == default) return Fail("Recovery state has an invalid creation time.", out error);
+            if (!state.ac && !state.dc) return Fail("Recovery state does not select AC or DC power.", out error);
+            if (state.lidAc > 3 || state.lidDc > 3) return Fail("Recovery state contains an invalid lid action.", out error);
+
+            (PowerPlanSnapshot snapshot, EnableOptions options) = GuardStore.CreateRecoveryUnchecked(state);
+            IReadOnlyList<PowerSettingWrite> apply = PowerPlanMutationPlanner.CreateApply(snapshot, options);
+            IReadOnlyList<PowerSettingWrite> restore = PowerPlanMutationPlanner.CreateRestore(snapshot, options);
+            if (apply.Count == 0 || apply.Count != restore.Count) return Fail("Recovery state has inconsistent write sets.", out error);
+            for (int index = 0; index < apply.Count; index++)
+            {
+                if (apply[index].Subgroup != restore[index].Subgroup ||
+                    apply[index].Setting != restore[index].Setting ||
+                    apply[index].Supply != restore[index].Supply ||
+                    apply[index].Value != 0)
+                {
+                    return Fail("Recovery state contains an unsafe write plan.", out error);
+                }
+            }
+
+            error = string.Empty;
+            return true;
+        }
+
+        private static bool Fail(string message, out string error)
+        {
+            error = message;
+            return false;
+        }
+    }
+
+    internal sealed class FileGuardStateRepository : IGuardStateRepository
+    {
+        public bool Exists => File.Exists(GuardPaths.StateFile);
+        public void Save(GuardState state) => GuardStore.Save(state);
+        public GuardState Load() => GuardStore.Load();
+        public void Delete() => GuardStore.Delete();
+    }
+
+    internal sealed class FileGuardReadySignal : IGuardReadySignal
+    {
+        public bool IsSet => File.Exists(GuardPaths.ReadyFile);
+
+        public void Reset()
+        {
+            if (File.Exists(GuardPaths.ReadyFile)) File.Delete(GuardPaths.ReadyFile);
+            string temp = GuardPaths.ReadyFile + ".tmp";
+            if (File.Exists(temp)) File.Delete(temp);
+        }
+
+        public void Set()
+        {
+            GuardStore.PrepareDirectory();
+            string temp = GuardPaths.ReadyFile + ".tmp";
+            using (FileStream stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (StreamWriter writer = new StreamWriter(stream))
+            {
+                writer.Write("ready");
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temp, GuardPaths.ReadyFile);
+        }
     }
 
     internal static class GuardStore
     {
+        private static readonly IReadOnlySet<string> StateMemberNames = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "schemaVersion", "schemeGuid", "lidAc", "lidDc", "sleepAc", "sleepDc",
+            "ac", "dc", "preventIdleSleep", "ownerProcessId", "createdUtc"
+        };
+
+        public static void Serialize(Stream stream, GuardState state)
+        {
+            ArgumentNullException.ThrowIfNull(stream);
+            ArgumentNullException.ThrowIfNull(state);
+            new DataContractJsonSerializer(typeof(GuardState)).WriteObject(stream, state);
+        }
+
+        public static GuardState Deserialize(Stream stream)
+        {
+            ArgumentNullException.ThrowIfNull(stream);
+            using MemoryStream copy = new MemoryStream();
+            stream.CopyTo(copy);
+            byte[] payload = copy.ToArray();
+            ValidateMemberNames(payload);
+            using MemoryStream deserializeStream = new MemoryStream(payload, writable: false);
+            GuardState? state = (GuardState?)new DataContractJsonSerializer(typeof(GuardState)).ReadObject(deserializeStream);
+            if (!GuardStateValidator.TryValidate(state, out string error)) throw new SerializationException(error);
+            return state!;
+        }
+
+        private static void ValidateMemberNames(byte[] payload)
+        {
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(payload);
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                throw new SerializationException("Recovery state must be a JSON object.");
+            foreach (System.Text.Json.JsonProperty property in document.RootElement.EnumerateObject())
+            {
+                if (!StateMemberNames.Contains(property.Name))
+                    throw new SerializationException("Recovery state contains unsupported fields.");
+            }
+        }
+
+        public static GuardState CreateState(PowerPlanSnapshot original, EnableOptions options, int ownerProcessId, DateTime createdUtc)
+        {
+            ArgumentNullException.ThrowIfNull(original);
+            ArgumentNullException.ThrowIfNull(options);
+            return new GuardState
+            {
+                schemeGuid = original.SchemeGuid,
+                lidAc = original.LidAc,
+                lidDc = original.LidDc,
+                sleepAc = original.SleepAc,
+                sleepDc = original.SleepDc,
+                ac = options.Ac,
+                dc = options.Dc,
+                preventIdleSleep = options.PreventIdleSleep,
+                ownerProcessId = ownerProcessId,
+                createdUtc = createdUtc
+            };
+        }
+
+        public static (PowerPlanSnapshot Snapshot, EnableOptions Options) CreateRecovery(GuardState state)
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (!GuardStateValidator.TryValidate(state, out string error)) throw new SerializationException(error);
+            return CreateRecoveryUnchecked(state);
+        }
+
+        internal static (PowerPlanSnapshot Snapshot, EnableOptions Options) CreateRecoveryUnchecked(GuardState state)
+        {
+            return (
+                new PowerPlanSnapshot
+                {
+                    SchemeGuid = state.schemeGuid,
+                    LidAc = state.lidAc,
+                    LidDc = state.lidDc,
+                    SleepAc = state.sleepAc,
+                    SleepDc = state.sleepDc
+                },
+                new EnableOptions
+                {
+                    Ac = state.ac,
+                    Dc = state.dc,
+                    PreventIdleSleep = state.preventIdleSleep
+                });
+        }
+
         public static void PrepareDirectory()
         {
             Directory.CreateDirectory(GuardPaths.DataDirectory);
@@ -41,18 +440,39 @@ namespace LidWorkMode
         public static void Save(GuardState state)
         {
             PrepareDirectory();
-            string temp = GuardPaths.StateFile + ".tmp";
-            using (FileStream stream = File.Create(temp)) new DataContractJsonSerializer(typeof(GuardState)).WriteObject(stream, state);
-            if (File.Exists(GuardPaths.StateFile)) File.Replace(temp, GuardPaths.StateFile, null); else File.Move(temp, GuardPaths.StateFile);
+            SaveExclusive(GuardPaths.StateFile, state);
+        }
+
+        internal static void SaveExclusive(string stateFile, GuardState state)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(stateFile);
+            ArgumentNullException.ThrowIfNull(state);
+            string? directory = Path.GetDirectoryName(stateFile);
+            if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+                throw new DirectoryNotFoundException("Recovery state directory does not exist.");
+
+            string temp = Path.Combine(directory, Path.GetFileName(stateFile) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                using (FileStream stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    Serialize(stream, state);
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temp, stateFile, overwrite: false);
+            }
+            finally
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); }
+                catch { }
+            }
         }
 
         public static GuardState Load()
         {
             using (FileStream stream = File.OpenRead(GuardPaths.StateFile))
             {
-                GuardState state = (GuardState)new DataContractJsonSerializer(typeof(GuardState)).ReadObject(stream);
-                if (state == null || state.schemaVersion != 1) throw new SerializationException("Unsupported recovery state schema.");
-                return state;
+                return Deserialize(stream);
             }
         }
 
@@ -65,14 +485,13 @@ namespace LidWorkMode
         {
             try
             {
-                if (args.Length == 0) return 64;
-                string command = args[0].ToLowerInvariant();
-                if (command == "self-test") { PowerPlanService.ReadCurrent(); return 0; }
-                if (command == "status") return File.Exists(GuardPaths.StateFile) ? 10 : 0;
-                if (command == "recover") { Recover(); return 0; }
-                if (command == "install") { Install(); return 0; }
-                if (command == "enable") return Enable(args);
-                return 64;
+                if (!GuardCommandParser.TryParse(args, out GuardInvocation invocation)) return GuardCommandParser.InvalidArgumentsExitCode;
+                if (invocation.Command == GuardCommand.SelfTest) { PowerPlanService.ReadCurrent(); return 0; }
+                if (invocation.Command == GuardCommand.Status) return File.Exists(GuardPaths.StateFile) ? 10 : 0;
+                if (invocation.Command == GuardCommand.Recover) { Recover(); return 0; }
+                if (invocation.Command == GuardCommand.Install) { Install(); return 0; }
+                if (invocation.Command == GuardCommand.Enable) return Enable(invocation);
+                return GuardCommandParser.InvalidArgumentsExitCode;
             }
             catch (Exception ex)
             {
@@ -81,30 +500,37 @@ namespace LidWorkMode
             }
         }
 
-        private static int Enable(string[] args)
+        private static int Enable(GuardInvocation invocation)
         {
-            if (args.Length != 5) return 64;
-            bool ac = ParseFlag(args[1]); bool dc = ParseFlag(args[2]); bool idle = ParseFlag(args[3]);
-            int ownerPid; if (!int.TryParse(args[4], out ownerPid) || ownerPid <= 0 || (!ac && !dc)) return 64;
+            if (!GuardEnablePolicy.CanEnable(File.Exists(GuardPaths.StateFile))) return GuardEnablePolicy.ExistingRecoveryStateExitCode;
+            EnableOptions options = invocation.Options!;
+            int ownerPid = invocation.OwnerProcessId;
             Process owner; try { owner = Process.GetProcessById(ownerPid); } catch { return 65; }
-            PowerPlanSnapshot original = PowerPlanService.ReadCurrent();
-            EnableOptions options = new EnableOptions { Ac = ac, Dc = dc, PreventIdleSleep = idle };
-            GuardState state = new GuardState { schemeGuid = original.SchemeGuid, lidAc = original.LidAc, lidDc = original.LidDc, sleepAc = original.SleepAc, sleepDc = original.SleepDc, ac = ac, dc = dc, preventIdleSleep = idle, ownerProcessId = ownerPid, createdUtc = DateTime.UtcNow };
-            GuardStore.Save(state);
-            try { PowerPlanService.Apply(original, options); }
-            catch { try { PowerPlanService.Restore(original, options); } finally { GuardStore.Delete(); } throw; }
+            IPowerPlanBackend power = new NativePowerPlanBackend();
+            PowerPlanSnapshot original = power.Read(power.GetActiveScheme());
+            FileGuardStateRepository states = new FileGuardStateRepository();
+            FileGuardReadySignal ready = new FileGuardReadySignal();
+            PowerGuardCoordinator coordinator = new PowerGuardCoordinator(power, states, ready);
+            GuardEnableOutcome outcome = coordinator.Enable(original, options, ownerPid, DateTime.UtcNow);
+            if (outcome != GuardEnableOutcome.Ready)
+            {
+                owner.Dispose();
+                return outcome is GuardEnableOutcome.ApplyFailedRestored or GuardEnableOutcome.VerificationFailedRestored ? 1 : 67;
+            }
 
             EventWaitHandle stopEvent = CreateStopEvent();
             try
             {
                 while (true)
                 {
-                    if (stopEvent.WaitOne(500)) break;
-                    if (owner.HasExited) break;
-                    if (PowerPlanService.GetActiveScheme() != original.SchemeGuid) break;
+                    bool stopRequested = stopEvent.WaitOne(500);
+                    Guid activeScheme = stopRequested || owner.HasExited
+                        ? original.SchemeGuid
+                        : PowerPlanService.GetActiveScheme();
+                    if (GuardMonitorPolicy.Evaluate(stopRequested, owner.HasExited, activeScheme, original.SchemeGuid) != GuardMonitorDecision.Continue) break;
                 }
             }
-            finally { stopEvent.Dispose(); Recover(); owner.Dispose(); }
+            finally { stopEvent.Dispose(); coordinator.Recover(); owner.Dispose(); }
             return 0;
         }
 
@@ -118,27 +544,22 @@ namespace LidWorkMode
 
         private static void Recover()
         {
-            if (!File.Exists(GuardPaths.StateFile)) return;
-            GuardState state = GuardStore.Load();
-            PowerPlanSnapshot original = new PowerPlanSnapshot { SchemeGuid = state.schemeGuid, LidAc = state.lidAc, LidDc = state.lidDc, SleepAc = state.sleepAc, SleepDc = state.sleepDc };
-            EnableOptions options = new EnableOptions { Ac = state.ac, Dc = state.dc, PreventIdleSleep = state.preventIdleSleep };
-            PowerPlanService.Restore(original, options);
-            GuardStore.Delete();
+            PowerGuardCoordinator coordinator = new PowerGuardCoordinator(new NativePowerPlanBackend(), new FileGuardStateRepository(), new FileGuardReadySignal());
+            if (!coordinator.Recover()) throw new InvalidOperationException("Power settings could not be fully restored and verified.");
         }
 
         private static void Install()
         {
             GuardStore.PrepareDirectory();
             Directory.CreateDirectory(GuardPaths.InstallDirectory);
-            string current = Process.GetCurrentProcess().MainModule.FileName;
+            string current = Process.GetCurrentProcess().MainModule?.FileName ?? Environment.ProcessPath ?? throw new InvalidOperationException("Unable to resolve the PowerGuard executable path.");
             if (!string.Equals(current, GuardPaths.InstalledExe, StringComparison.OrdinalIgnoreCase)) File.Copy(current, GuardPaths.InstalledExe, true);
             string arguments = "/Create /F /TN \"YingqiTools-PowerGuard-Recover\" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR \"\\\"" + GuardPaths.InstalledExe + "\\\" recover\"";
-            Process process = Process.Start(new ProcessStartInfo("schtasks.exe", arguments) { UseShellExecute = false, CreateNoWindow = true });
+            using Process process = Process.Start(new ProcessStartInfo("schtasks.exe", arguments) { UseShellExecute = false, CreateNoWindow = true }) ?? throw new InvalidOperationException("Failed to start schtasks.exe.");
             process.WaitForExit(); if (process.ExitCode != 0) throw new InvalidOperationException("Failed to create recovery task.");
-            Process verify = Process.Start(new ProcessStartInfo("schtasks.exe", "/Query /TN \"YingqiTools-PowerGuard-Recover\"") { UseShellExecute = false, CreateNoWindow = true });
+            using Process verify = Process.Start(new ProcessStartInfo("schtasks.exe", "/Query /TN \"YingqiTools-PowerGuard-Recover\"") { UseShellExecute = false, CreateNoWindow = true }) ?? throw new InvalidOperationException("Failed to start schtasks.exe verification.");
             verify.WaitForExit(); if (verify.ExitCode != 0) throw new InvalidOperationException("Recovery task verification failed.");
         }
 
-        private static bool ParseFlag(string value) { if (value == "1") return true; if (value == "0") return false; throw new ArgumentException("Boolean flags must be 0 or 1."); }
     }
 }

@@ -18,6 +18,8 @@ if ($LockedMode) { $restoreArgs += '--locked-mode' }
 if ($LASTEXITCODE -ne 0) { throw 'Restore failed.' }
 & $dotnet build $solution -c Release --no-restore
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+& $dotnet test (Join-Path $root 'tests\LidWorkMode.Tests\LidWorkMode.Tests.csproj') -c Release --no-build --no-restore
+if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed.' }
 & $dotnet publish (Join-Path $root 'src\PowerGuard\PowerGuard.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false --no-restore -o (Join-Path $build 'guard')
 if ($LASTEXITCODE -ne 0) { throw 'PowerGuard publish failed.' }
 Copy-Item (Join-Path $root 'src\LidWorkModeComponent\bin\Release\net10.0-windows\LidWorkModeComponent.dll') $build -Force

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.IO;
 
@@ -8,6 +9,7 @@ namespace LidWorkMode
     {
         public static readonly string DataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "YingqiTools", "PowerGuard");
         public static readonly string StateFile = Path.Combine(DataDirectory, "recovery.json");
+        public static readonly string ReadyFile = Path.Combine(DataDirectory, "ready");
         public const string StopEventName = "Global\\YingqiTools.PowerGuard.Stop";
         public static readonly string InstallDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "YingqiTools", "PowerGuard");
         public static readonly string InstalledExe = Path.Combine(InstallDirectory, "PowerGuard.exe");
@@ -27,6 +29,77 @@ namespace LidWorkMode
         public uint LidDc { get; set; }
         public uint SleepAc { get; set; }
         public uint SleepDc { get; set; }
+    }
+
+    public readonly record struct LidWorkModeState(bool IsActive, bool RequiresRecovery)
+    {
+        public static LidWorkModeState FromFiles(bool stateExists, bool readyExists) =>
+            new(stateExists && readyExists, stateExists);
+    }
+
+    internal enum PowerSupply
+    {
+        Ac,
+        Dc
+    }
+
+    internal readonly record struct PowerSettingWrite(PowerSupply Supply, Guid Subgroup, Guid Setting, uint Value);
+
+    internal interface IPowerPlanBackend
+    {
+        PowerPlanSnapshot Read(Guid scheme);
+        Guid GetActiveScheme();
+        void Write(Guid scheme, PowerSettingWrite write);
+        void Activate(Guid scheme);
+    }
+
+    internal sealed class NativePowerPlanBackend : IPowerPlanBackend
+    {
+        public PowerPlanSnapshot Read(Guid scheme) => new PowerPlanSnapshot
+        {
+            SchemeGuid = scheme,
+            LidAc = PowerPlanService.ReadAcValue(scheme, PowerPlanService.ButtonSubgroup, PowerPlanService.LidAction),
+            LidDc = PowerPlanService.ReadDcValue(scheme, PowerPlanService.ButtonSubgroup, PowerPlanService.LidAction),
+            SleepAc = PowerPlanService.ReadAcValue(scheme, PowerPlanService.SleepSubgroup, PowerPlanService.StandbyIdle),
+            SleepDc = PowerPlanService.ReadDcValue(scheme, PowerPlanService.SleepSubgroup, PowerPlanService.StandbyIdle)
+        };
+
+        public Guid GetActiveScheme() => PowerPlanService.GetActiveScheme();
+
+        public void Write(Guid scheme, PowerSettingWrite write) => PowerPlanService.WriteValue(scheme, write);
+
+        public void Activate(Guid scheme) => PowerPlanService.ActivateScheme(scheme);
+    }
+
+    internal static class PowerPlanMutationPlanner
+    {
+        public static IReadOnlyList<PowerSettingWrite> CreateApply(PowerPlanSnapshot original, EnableOptions options)
+        {
+            ArgumentNullException.ThrowIfNull(original);
+            ArgumentNullException.ThrowIfNull(options);
+
+            List<PowerSettingWrite> writes = new List<PowerSettingWrite>();
+            AddSelectedWrites(writes, options, 0, 0, 0, 0);
+            return writes;
+        }
+
+        public static IReadOnlyList<PowerSettingWrite> CreateRestore(PowerPlanSnapshot original, EnableOptions options)
+        {
+            ArgumentNullException.ThrowIfNull(original);
+            ArgumentNullException.ThrowIfNull(options);
+
+            List<PowerSettingWrite> writes = new List<PowerSettingWrite>();
+            AddSelectedWrites(writes, options, original.LidAc, original.LidDc, original.SleepAc, original.SleepDc);
+            return writes;
+        }
+
+        private static void AddSelectedWrites(List<PowerSettingWrite> writes, EnableOptions options, uint lidAc, uint lidDc, uint sleepAc, uint sleepDc)
+        {
+            if (options.Ac) writes.Add(new PowerSettingWrite(PowerSupply.Ac, PowerPlanService.ButtonSubgroup, PowerPlanService.LidAction, lidAc));
+            if (options.Dc) writes.Add(new PowerSettingWrite(PowerSupply.Dc, PowerPlanService.ButtonSubgroup, PowerPlanService.LidAction, lidDc));
+            if (options.PreventIdleSleep && options.Ac) writes.Add(new PowerSettingWrite(PowerSupply.Ac, PowerPlanService.SleepSubgroup, PowerPlanService.StandbyIdle, sleepAc));
+            if (options.PreventIdleSleep && options.Dc) writes.Add(new PowerSettingWrite(PowerSupply.Dc, PowerPlanService.SleepSubgroup, PowerPlanService.StandbyIdle, sleepDc));
+        }
     }
 
     public static class PowerPlanService
@@ -59,20 +132,34 @@ namespace LidWorkMode
 
         public static void Apply(PowerPlanSnapshot original, EnableOptions options)
         {
-            if (options.Ac) WriteAc(original.SchemeGuid, ButtonSubgroup, LidAction, 0);
-            if (options.Dc) WriteDc(original.SchemeGuid, ButtonSubgroup, LidAction, 0);
-            if (options.PreventIdleSleep && options.Ac) WriteAc(original.SchemeGuid, SleepSubgroup, StandbyIdle, 0);
-            if (options.PreventIdleSleep && options.Dc) WriteDc(original.SchemeGuid, SleepSubgroup, StandbyIdle, 0);
-            Activate(original.SchemeGuid);
+            Apply(new NativePowerPlanBackend(), original, options);
         }
 
         public static void Restore(PowerPlanSnapshot original, EnableOptions options)
         {
-            if (options.Ac) WriteAc(original.SchemeGuid, ButtonSubgroup, LidAction, original.LidAc);
-            if (options.Dc) WriteDc(original.SchemeGuid, ButtonSubgroup, LidAction, original.LidDc);
-            if (options.PreventIdleSleep && options.Ac) WriteAc(original.SchemeGuid, SleepSubgroup, StandbyIdle, original.SleepAc);
-            if (options.PreventIdleSleep && options.Dc) WriteDc(original.SchemeGuid, SleepSubgroup, StandbyIdle, original.SleepDc);
-            if (GetActiveScheme() == original.SchemeGuid) Activate(original.SchemeGuid);
+            Restore(new NativePowerPlanBackend(), original, options);
+        }
+
+        internal static void Apply(IPowerPlanBackend backend, PowerPlanSnapshot original, EnableOptions options)
+        {
+            foreach (PowerSettingWrite write in PowerPlanMutationPlanner.CreateApply(original, options)) backend.Write(original.SchemeGuid, write);
+            backend.Activate(original.SchemeGuid);
+        }
+
+        internal static void Restore(IPowerPlanBackend backend, PowerPlanSnapshot original, EnableOptions options)
+        {
+            foreach (PowerSettingWrite write in PowerPlanMutationPlanner.CreateRestore(original, options)) backend.Write(original.SchemeGuid, write);
+            if (backend.GetActiveScheme() == original.SchemeGuid) backend.Activate(original.SchemeGuid);
+        }
+
+        internal static uint ReadAcValue(Guid scheme, Guid subgroup, Guid setting) => ReadAc(scheme, subgroup, setting);
+        internal static uint ReadDcValue(Guid scheme, Guid subgroup, Guid setting) => ReadDc(scheme, subgroup, setting);
+        internal static void ActivateScheme(Guid scheme) => Activate(scheme);
+
+        internal static void WriteValue(Guid scheme, PowerSettingWrite write)
+        {
+            if (write.Supply == PowerSupply.Ac) WriteAc(scheme, write.Subgroup, write.Setting, write.Value);
+            else WriteDc(scheme, write.Subgroup, write.Setting, write.Value);
         }
 
         private static uint ReadAc(Guid scheme, Guid subgroup, Guid setting) { uint value; Check(PowerReadACValueIndex(IntPtr.Zero, ref scheme, ref subgroup, ref setting, out value), "PowerReadACValueIndex"); return value; }

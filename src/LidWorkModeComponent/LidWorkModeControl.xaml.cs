@@ -13,18 +13,21 @@ public partial class LidWorkModeControl : UserControl
     private bool _active;
     private bool _suppressBatteryDialog;
 
-    public bool IsActive => _active || File.Exists(GuardPaths.StateFile);
+    public bool IsActive => _active;
+    public bool RequiresRecovery => ReadState().RequiresRecovery;
+    private bool HasPendingRecovery => ReadState() is { RequiresRecovery: true, IsActive: false };
 
     public LidWorkModeControl()
     {
         InitializeComponent();
+        _active = ReadState().IsActive;
         RefreshSnapshot();
         UpdateUi();
     }
 
     public async Task<bool> RestoreAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        if (!IsActive) return true;
+        if (!IsActive && !HasPendingRecovery) return true;
         SetBusy(true);
         try
         {
@@ -35,14 +38,15 @@ public partial class LidWorkModeControl : UserControl
                 DateTime deadline = DateTime.UtcNow.Add(timeout);
                 while (File.Exists(GuardPaths.StateFile) && DateTime.UtcNow < deadline)
                     await Task.Delay(100, cancellationToken);
-                _active = File.Exists(GuardPaths.StateFile);
+                _active = ReadState().IsActive;
             }
             catch (WaitHandleCannotBeOpenedException)
             {
                 _active = !await RunRecoveryElevatedAsync(timeout, cancellationToken);
             }
-            SetStatus(_active ? InfoBarSeverity.Warning : InfoBarSeverity.Success, _active ? "恢复尚未完成" : "已恢复原设置", _active ? "请重试，或在下次启动时由 PowerGuard 恢复。" : "所有托管值已写回启用前状态。");
-            return !_active;
+            bool recoveryPending = ReadState().RequiresRecovery;
+            SetStatus(recoveryPending ? InfoBarSeverity.Warning : InfoBarSeverity.Success, recoveryPending ? "恢复尚未完成" : "已恢复原设置", recoveryPending ? "恢复记录仍然存在，请重试，或在下次启动时由 PowerGuard 恢复。" : "所有托管值已写回启用前状态。");
+            return !recoveryPending;
         }
         finally { UpdateUi(); RefreshSnapshot(); SetBusy(false); }
     }
@@ -80,14 +84,30 @@ public partial class LidWorkModeControl : UserControl
                 return;
             }
             DateTime deadline = DateTime.UtcNow.AddSeconds(10);
-            while (!File.Exists(GuardPaths.StateFile) && _guard is { HasExited: false } && DateTime.UtcNow < deadline) await Task.Delay(100);
-            _active = File.Exists(GuardPaths.StateFile);
-            SetStatus(_active ? InfoBarSeverity.Success : InfoBarSeverity.Error, _active ? "已启用" : "启用失败", _active ? "关闭 Yingqi Tools 时会自动恢复原设置。" : "电源设置未保持修改。");
+            while (_guard is { HasExited: false } && DateTime.UtcNow < deadline)
+            {
+                if (ReadState().IsActive) { _active = true; break; }
+                await Task.Delay(100);
+            }
+            bool pendingRecovery = HasPendingRecovery;
+            SetStatus(
+                _active ? InfoBarSeverity.Success : pendingRecovery ? InfoBarSeverity.Warning : InfoBarSeverity.Error,
+                _active ? "已启用" : pendingRecovery ? "待恢复" : "启用失败",
+                _active ? "关闭 Yingqi Tools 时会自动恢复原设置。" : pendingRecovery ? "设置未完成验证，请立即恢复。" : "电源设置未保持修改。");
+        }
+        catch (Exception ex)
+        {
+            _active = ReadState().IsActive;
+            SetStatus(InfoBarSeverity.Error, "启用失败", ex.Message);
         }
         finally { UpdateUi(); RefreshSnapshot(); SetBusy(false); }
     }
 
-    private async void Restore_Click(object sender, RoutedEventArgs e) => await RestoreAsync(TimeSpan.FromSeconds(10));
+    private async void Restore_Click(object sender, RoutedEventArgs e)
+    {
+        try { await RestoreAsync(TimeSpan.FromSeconds(10)); }
+        catch (Exception ex) { SetStatus(InfoBarSeverity.Error, "恢复失败", ex.Message); }
+    }
 
     private async void DcToggle_Checked(object sender, RoutedEventArgs e)
     {
@@ -134,12 +154,12 @@ public partial class LidWorkModeControl : UserControl
 
     private void UpdateUi()
     {
-        _active = IsActive;
-        EnableButton.IsEnabled = !_active;
-        RestoreButton.IsEnabled = _active;
-        AcToggle.IsEnabled = DcToggle.IsEnabled = IdleToggle.IsEnabled = !_active;
-        StateBadge.Content = _active ? "已启用" : "待命";
-        StateBadge.Appearance = _active ? ControlAppearance.Success : ControlAppearance.Secondary;
+        bool pendingRecovery = HasPendingRecovery;
+        EnableButton.IsEnabled = !_active && !pendingRecovery;
+        RestoreButton.IsEnabled = _active || pendingRecovery;
+        AcToggle.IsEnabled = DcToggle.IsEnabled = IdleToggle.IsEnabled = !_active && !pendingRecovery;
+        StateBadge.Content = _active ? "已启用" : pendingRecovery ? "待恢复" : "待命";
+        StateBadge.Appearance = _active ? ControlAppearance.Success : pendingRecovery ? ControlAppearance.Caution : ControlAppearance.Secondary;
     }
 
     private void SetBusy(bool busy)
@@ -152,6 +172,9 @@ public partial class LidWorkModeControl : UserControl
     {
         StatusBar.Severity = severity; StatusBar.Title = title; StatusBar.Message = message;
     }
+
+    private static LidWorkModeState ReadState() =>
+        LidWorkModeState.FromFiles(File.Exists(GuardPaths.StateFile), File.Exists(GuardPaths.ReadyFile));
 
     private static string ActionName(uint value) => value switch { 0 => "不操作", 1 => "睡眠", 2 => "休眠", 3 => "关机", _ => value.ToString() };
     private static string SleepName(uint value)

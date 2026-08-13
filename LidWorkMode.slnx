@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="src/LidWorkModeComponent/LidWorkModeComponent.csproj" />
   <Project Path="src/PowerGuard/PowerGuard.csproj" />
+  <Project Path="tests/LidWorkMode.Tests/LidWorkMode.Tests.csproj" />
 </Solution>
