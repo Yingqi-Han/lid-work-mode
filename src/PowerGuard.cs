@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.Serialization;
@@ -349,6 +350,8 @@ namespace LidWorkMode
             "ac", "dc", "preventIdleSleep", "ownerProcessId", "createdUtc"
         };
 
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(GuardState))]
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "GuardState is the only data contract and all of its members are explicitly preserved.")]
         public static void Serialize(Stream stream, GuardState state)
         {
             ArgumentNullException.ThrowIfNull(stream);
@@ -356,6 +359,8 @@ namespace LidWorkMode
             new DataContractJsonSerializer(typeof(GuardState)).WriteObject(stream, state);
         }
 
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(GuardState))]
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "GuardState is the only data contract and all of its members are explicitly preserved.")]
         public static GuardState Deserialize(Stream stream)
         {
             ArgumentNullException.ThrowIfNull(stream);
@@ -378,6 +383,41 @@ namespace LidWorkMode
             {
                 if (!StateMemberNames.Contains(property.Name))
                     throw new SerializationException("Recovery state contains unsupported fields.");
+            }
+        }
+
+        internal static void VerifySerializationRoundTrip()
+        {
+            DateTime createdUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+            GuardState expected = CreateState(
+                new PowerPlanSnapshot
+                {
+                    SchemeGuid = new Guid("4b607d49-78c4-4638-b1f7-4ca7e74b0383"),
+                    LidAc = 1,
+                    LidDc = 2,
+                    SleepAc = 0,
+                    SleepDc = 180
+                },
+                new EnableOptions { Ac = true, Dc = true, PreventIdleSleep = true },
+                42,
+                createdUtc);
+            using MemoryStream stream = new MemoryStream();
+            Serialize(stream, expected);
+            stream.Position = 0;
+            GuardState actual = Deserialize(stream);
+            if (actual.schemaVersion != expected.schemaVersion ||
+                actual.schemeGuid != expected.schemeGuid ||
+                actual.lidAc != expected.lidAc ||
+                actual.lidDc != expected.lidDc ||
+                actual.sleepAc != expected.sleepAc ||
+                actual.sleepDc != expected.sleepDc ||
+                actual.ac != expected.ac ||
+                actual.dc != expected.dc ||
+                actual.preventIdleSleep != expected.preventIdleSleep ||
+                actual.ownerProcessId != expected.ownerProcessId ||
+                actual.createdUtc != expected.createdUtc)
+            {
+                throw new InvalidOperationException("Recovery state serialization self-test failed.");
             }
         }
 
@@ -486,7 +526,7 @@ namespace LidWorkMode
             try
             {
                 if (!GuardCommandParser.TryParse(args, out GuardInvocation invocation)) return GuardCommandParser.InvalidArgumentsExitCode;
-                if (invocation.Command == GuardCommand.SelfTest) { PowerPlanService.ReadCurrent(); return 0; }
+                if (invocation.Command == GuardCommand.SelfTest) { GuardStore.VerifySerializationRoundTrip(); PowerPlanService.ReadCurrent(); return 0; }
                 if (invocation.Command == GuardCommand.Status) return File.Exists(GuardPaths.StateFile) ? 10 : 0;
                 if (invocation.Command == GuardCommand.Recover) { Recover(); return 0; }
                 if (invocation.Command == GuardCommand.Install) { Install(); return 0; }
