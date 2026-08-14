@@ -57,7 +57,7 @@ public partial class LidWorkModeControl : UserControl
     {
         if (ContentScroller.ScrollableHeight <= 0) return false;
         double previousOffset = ContentScroller.VerticalOffset;
-        ContentScroller.ScrollToVerticalOffset(previousOffset - delta);
+        ContentScroller.ScrollToVerticalOffset(previousOffset - (delta / 120d * 144d));
         return !ContentScroller.VerticalOffset.Equals(previousOffset);
     }
 
@@ -158,8 +158,6 @@ public partial class LidWorkModeControl : UserControl
         EnableButton.IsEnabled = !_active && !pendingRecovery;
         RestoreButton.IsEnabled = _active || pendingRecovery;
         AcToggle.IsEnabled = DcToggle.IsEnabled = IdleToggle.IsEnabled = !_active && !pendingRecovery;
-        StateBadge.Content = _active ? "已启用" : pendingRecovery ? "待恢复" : "待命";
-        StateBadge.Appearance = _active ? ControlAppearance.Success : pendingRecovery ? ControlAppearance.Caution : ControlAppearance.Secondary;
     }
 
     private void SetBusy(bool busy)
